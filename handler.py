@@ -12,6 +12,9 @@ import subprocess
 import librosa
 import shutil
 
+LAST_EXECUTION_ERROR = ""
+
+
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -185,6 +188,21 @@ def get_videos(ws, prompt, input_type="image", person_count="single"):
     logger.info(f"히스토리 조회 중: prompt_id={prompt_id}")
     history = get_history(prompt_id)[prompt_id]
     logger.info(f"출력 노드 수: {len(history['outputs'])}")
+
+    # rviv patch: capture ComfyUI execution errors so callers see the real failure
+    global LAST_EXECUTION_ERROR
+    LAST_EXECUTION_ERROR = ""
+    try:
+        for m in history.get("status", {}).get("messages", []):
+            if m and m[0] == "execution_error" and len(m) > 1:
+                ex = m[1] or {}
+                LAST_EXECUTION_ERROR = (
+                    f"node {ex.get('node_id')} {ex.get('node_type')}: "
+                    f"{str(ex.get('exception_message', ''))[:600]}"
+                )
+                logger.error(f"ComfyUI execution_error: {LAST_EXECUTION_ERROR}")
+    except Exception as _e:
+        logger.warning(f"execution_error 파싱 실패: {_e}")
 
     for node_id in history["outputs"]:
         node_output = history["outputs"][node_id]
@@ -528,17 +546,22 @@ def handler(job):
     output_video_path = None
     logger.info("출력 비디오 검색 중...")
 
-    for node_id in videos:
-        if videos[node_id]:
-            output_video_path = videos[node_id][0]
-            logger.info(f"노드 {node_id}에서 출력 비디오 발견: {output_video_path}")
-            break
-        else:
-            logger.info(f"노드 {node_id}는 비어있음")
+    # rviv patch (issue #17): prefer the final muxed output (-audio.mp4),
+    # otherwise the largest existing video, instead of the first node found
+    candidates = [
+        p for paths in videos.values() for p in (paths or []) if p and os.path.exists(p)
+    ]
+    audio_muxed = [p for p in candidates if p.endswith("-audio.mp4")]
+    if audio_muxed:
+        output_video_path = max(audio_muxed, key=os.path.getsize)
+    elif candidates:
+        output_video_path = max(candidates, key=os.path.getsize)
+    logger.info(f"출력 후보 {len(candidates)}개, 선택: {output_video_path}")
 
     if not output_video_path:
         logger.error("출력 비디오를 찾을 수 없습니다. 모든 노드가 비어있습니다.")
-        return {"error": "비디오를 찾을 수 없습니다."}
+        detail = f" | {LAST_EXECUTION_ERROR}" if LAST_EXECUTION_ERROR else ""
+        return {"error": "비디오를 찾을 수 없습니다." + detail}
 
     # 비디오 파일 존재 여부 확인
     if not os.path.exists(output_video_path):
