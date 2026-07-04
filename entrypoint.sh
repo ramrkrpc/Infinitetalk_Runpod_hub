@@ -12,8 +12,11 @@ fetch() {
     mkdir -p "$MODELS_DIR/$sub" "/ComfyUI/models/$sub"
     local dst="$MODELS_DIR/$sub/$name"
     if [ ! -f "$dst" ]; then
-        echo "Downloading $name ..."
-        wget -q "$url" -O "$dst.part.$$" && mv "$dst.part.$$" "$dst"
+        # wget -c resumes a partial download if a previous worker was
+        # restarted mid-fetch; deterministic .part name makes that possible
+        echo "$(date +%T) downloading $name ..."
+        wget -q -c "$url" -O "$dst.part" && mv "$dst.part" "$dst"
+        echo "$(date +%T) done: $name ($(du -h "$dst" | cut -f1))"
     fi
     ln -sf "$dst" "/ComfyUI/models/$sub/$name"
 }
